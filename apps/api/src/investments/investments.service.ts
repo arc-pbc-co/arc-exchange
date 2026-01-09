@@ -22,7 +22,7 @@ export class InvestmentsService {
           },
         },
       },
-      orderBy: { purchasedAt: 'desc' },
+      orderBy: { firstPurchasedAt: 'desc' },
     });
   }
 
@@ -41,22 +41,41 @@ export class InvestmentsService {
 
     // Calculate investment amount
     const tokenAmount = BigInt(dto.tokenAmount);
-    const purchasePriceUsd = pool.pricePerToken.mul(Number(tokenAmount));
+    const totalInvestedUsd = pool.pricePerToken.mul(Number(tokenAmount));
 
     // Check if pool would exceed target
-    const newTotal = pool.currentRaise.add(purchasePriceUsd);
+    const newTotal = pool.currentRaise.add(totalInvestedUsd);
     if (newTotal.gt(pool.targetRaise)) {
       throw new BadRequestException('Investment would exceed pool target raise');
     }
 
-    // Create investment record
-    const investment = await this.prisma.investment.create({
-      data: {
+    const now = new Date();
+
+    // Create or update investment record
+    const investment = await this.prisma.investment.upsert({
+      where: {
+        userId_poolId: {
+          userId,
+          poolId: dto.poolId,
+        },
+      },
+      create: {
         userId,
         poolId: dto.poolId,
         tokenAmount,
-        purchasePriceUsd,
-        txHash: dto.txHash,
+        totalInvestedUsd,
+        averagePriceUsd: pool.pricePerToken,
+        firstPurchasedAt: now,
+        lastPurchasedAt: now,
+      },
+      update: {
+        tokenAmount: {
+          increment: tokenAmount,
+        },
+        totalInvestedUsd: {
+          increment: totalInvestedUsd,
+        },
+        lastPurchasedAt: now,
       },
       include: {
         pool: true,
@@ -64,23 +83,16 @@ export class InvestmentsService {
     });
 
     // Update pool raised amount
-    await this.poolsService.updateRaisedAmount(dto.poolId, Number(purchasePriceUsd));
+    await this.poolsService.updateRaisedAmount(dto.poolId, Number(totalInvestedUsd));
 
     return investment;
-  }
-
-  async recordTransaction(investmentId: string, txHash: string) {
-    return this.prisma.investment.update({
-      where: { id: investmentId },
-      data: { txHash },
-    });
   }
 
   async getPortfolioSummary(userId: string) {
     const investments = await this.findByUser(userId);
 
     const totalInvested = investments.reduce(
-      (sum, inv) => sum + Number(inv.purchasePriceUsd),
+      (sum, inv) => sum + Number(inv.totalInvestedUsd),
       0,
     );
 
@@ -100,9 +112,9 @@ export class InvestmentsService {
         poolName: inv.pool.name,
         poolSector: inv.pool.sector,
         tokenAmount: inv.tokenAmount.toString(),
-        purchasePriceUsd: Number(inv.purchasePriceUsd),
+        totalInvestedUsd: Number(inv.totalInvestedUsd),
         yieldRate: Number(inv.pool.yieldRate),
-        purchasedAt: inv.purchasedAt,
+        firstPurchasedAt: inv.firstPurchasedAt,
       })),
     };
   }

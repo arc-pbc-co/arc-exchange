@@ -35,8 +35,8 @@ export class PoolsService {
           select: {
             id: true,
             tokenAmount: true,
-            purchasePriceUsd: true,
-            purchasedAt: true,
+            totalInvestedUsd: true,
+            firstPurchasedAt: true,
           },
         },
         distributions: {
@@ -93,7 +93,7 @@ export class PoolsService {
   async activate(id: string) {
     const pool = await this.findById(id);
 
-    if (pool.status !== PoolStatus.DRAFT && pool.status !== PoolStatus.PENDING_APPROVAL) {
+    if (pool.status !== PoolStatus.DRAFT && pool.status !== PoolStatus.PENDING_REVIEW) {
       throw new Error('Pool cannot be activated from current status');
     }
 
