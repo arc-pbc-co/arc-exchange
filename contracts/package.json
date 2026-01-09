@@ -1,0 +1,16 @@
+{
+  "name": "@arc-exchange/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "forge build",
+    "test": "forge test",
+    "test:gas": "forge test --gas-report",
+    "coverage": "forge coverage",
+    "clean": "forge clean",
+    "fmt": "forge fmt",
+    "deploy:local": "forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast",
+    "deploy:amoy": "forge script script/Deploy.s.sol --rpc-url $POLYGON_AMOY_RPC_URL --broadcast --verify",
+    "deploy:polygon": "forge script script/Deploy.s.sol --rpc-url $POLYGON_RPC_URL --broadcast --verify"
+  }
+}
