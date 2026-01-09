@@ -7,46 +7,95 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// =============================================================================
+// USER & AUTHENTICATION
+// =============================================================================
+
 // User accounts linked to wallet addresses
 model User {
   id            String   @id @default(cuid())
   walletAddress String   @unique @map("wallet_address")
   email         String?  @unique
+  displayName   String?  @map("display_name")
+  avatarUrl     String?  @map("avatar_url")
+  isActive      Boolean  @default(true) @map("is_active")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
   // Relations
-  kycVerification KycVerification?
-  investments     Investment[]
-  nonces          AuthNonce[]
+  kycVerification    KycVerification?
+  investments        Investment[]
+  nonces             AuthNonce[]
+  transactions       Transaction[]
+  distributionClaims DistributionClaim[]
+  notifications      Notification[]
+  watchlist          PoolWatchlist[]
 
+  @@index([walletAddress])
+  @@index([email])
   @@map("users")
+}
+
+// Admin users for platform management (separate from wallet users)
+model AdminUser {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  firstName    String    @map("first_name")
+  lastName     String    @map("last_name")
+  role         AdminRole @default(OPERATOR)
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  auditLogs     AuditLog[]
+  createdPools  Pool[]         @relation("PoolCreatedBy")
+  distributions Distribution[] @relation("DistributionCreatedBy")
+
+  @@index([email])
+  @@map("admin_users")
+}
+
+enum AdminRole {
+  SUPER_ADMIN // Full platform access
+  ADMIN       // Pool and user management
+  OPERATOR    // Basic operations
+  VIEWER      // Read-only access
 }
 
 // KYC/Accreditation verification records
 model KycVerification {
-  id              String    @id @default(cuid())
-  userId          String    @unique @map("user_id")
-  provider        String    // e.g., "verifyinvestor", "accredify"
-  status          KycStatus @default(PENDING)
-  isAccredited    Boolean   @default(false) @map("is_accredited")
-  isUsPerson      Boolean   @default(false) @map("is_us_person")
-  verifiedAt      DateTime? @map("verified_at")
-  expiresAt       DateTime? @map("expires_at")
-  externalId      String?   @map("external_id") // Provider's reference ID
-  rawResponse     Json?     @map("raw_response")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
+  id                 String    @id @default(cuid())
+  userId             String    @unique @map("user_id")
+  provider           String    // e.g., "verifyinvestor", "parallel_markets"
+  status             KycStatus @default(PENDING)
+  isAccredited       Boolean   @default(false) @map("is_accredited")
+  isUsPerson         Boolean   @default(false) @map("is_us_person")
+  accreditationType  String?   @map("accreditation_type") // e.g., "income", "net_worth", "professional"
+  verifiedAt         DateTime? @map("verified_at")
+  expiresAt          DateTime? @map("expires_at")
+  externalId         String?   @map("external_id") // Provider's reference ID
+  documentIds        String[]  @map("document_ids") // References to uploaded documents
+  rawResponse        Json?     @map("raw_response")
+  rejectionReason    String?   @map("rejection_reason")
+  reviewedBy         String?   @map("reviewed_by") // Admin who reviewed
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
   // Relations
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([status])
+  @@index([externalId])
   @@map("kyc_verifications")
 }
 
 enum KycStatus {
   PENDING
   IN_PROGRESS
+  UNDER_REVIEW
   APPROVED
   REJECTED
   EXPIRED
@@ -54,113 +103,518 @@ enum KycStatus {
 
 // Authentication nonces for SIWE
 model AuthNonce {
-  id        String   @id @default(cuid())
-  userId    String?  @map("user_id")
-  nonce     String   @unique
-  expiresAt DateTime @map("expires_at")
-  createdAt DateTime @default(now()) @map("created_at")
+  id            String   @id @default(cuid())
+  userId        String?  @map("user_id")
+  nonce         String   @unique
+  walletAddress String?  @map("wallet_address") // Pre-auth wallet tracking
+  expiresAt     DateTime @map("expires_at")
+  usedAt        DateTime? @map("used_at")
+  createdAt     DateTime @default(now()) @map("created_at")
 
   // Relations
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([nonce])
+  @@index([expiresAt])
   @@map("auth_nonces")
 }
 
+// =============================================================================
+// POOLS & INVESTMENTS
+// =============================================================================
+
 // Investment pools created by admin
 model Pool {
-  id               String     @id @default(cuid())
-  name             String
-  description      String
-  sector           String     // e.g., "Real Estate", "Infrastructure"
-  targetRaise      Decimal    @map("target_raise") @db.Decimal(18, 2)
-  currentRaise     Decimal    @default(0) @map("current_raise") @db.Decimal(18, 2)
-  yieldRate        Decimal    @map("yield_rate") @db.Decimal(5, 2) // e.g., 8.50%
-  maturityDate     DateTime   @map("maturity_date")
-  status           PoolStatus @default(DRAFT)
-  imageUrl         String?    @map("image_url")
-  metadataUri      String?    @map("metadata_uri") // IPFS URI for NFT metadata
-  contractTokenId  BigInt?    @map("contract_token_id") // ERC-1155 token ID
-  totalSupply      BigInt     @default(0) @map("total_supply")
-  pricePerToken    Decimal    @map("price_per_token") @db.Decimal(18, 6) // In USDC
-  createdAt        DateTime   @default(now()) @map("created_at")
-  updatedAt        DateTime   @updatedAt @map("updated_at")
+  id                  String     @id @default(cuid())
+  name                String
+  description         String     @db.Text
+  shortDescription    String?    @map("short_description")
+  sector              String     // e.g., "Real Estate", "Infrastructure", "Clean Energy"
+  subsector           String?    // More specific categorization
+  targetRaise         Decimal    @map("target_raise") @db.Decimal(18, 2)
+  minInvestment       Decimal    @default(100) @map("min_investment") @db.Decimal(18, 2)
+  maxInvestment       Decimal?   @map("max_investment") @db.Decimal(18, 2) // Per investor
+  currentRaise        Decimal    @default(0) @map("current_raise") @db.Decimal(18, 2)
+  yieldRate           Decimal    @map("yield_rate") @db.Decimal(5, 2) // e.g., 8.50%
+  yieldFrequency      YieldFrequency @default(QUARTERLY) @map("yield_frequency")
+  maturityDate        DateTime   @map("maturity_date")
+  startDate           DateTime?  @map("start_date") // When investment opens
+  endDate             DateTime?  @map("end_date") // When investment closes
+  status              PoolStatus @default(DRAFT)
+  riskRating          RiskRating @default(MEDIUM) @map("risk_rating")
+
+  // Media & Content
+  imageUrl            String?    @map("image_url")
+  bannerUrl           String?    @map("banner_url")
+  documents           Json?      // Array of document references {name, url, type}
+  highlights          String[]   // Key investment highlights
+
+  // Blockchain Integration
+  metadataUri         String?    @map("metadata_uri") // IPFS URI for NFT metadata
+  contractTokenId     BigInt?    @map("contract_token_id") // ERC-1155 token ID on ProjectPool
+  contractAddress     String?    @map("contract_address") // If different from main contract
+  marketplaceListingId BigInt?   @map("marketplace_listing_id") // Marketplace contract listing ID
+
+  // Token Economics
+  totalSupply         BigInt     @default(0) @map("total_supply")
+  availableSupply     BigInt     @default(0) @map("available_supply")
+  pricePerToken       Decimal    @map("price_per_token") @db.Decimal(18, 6) // In USDC
+  isTransferable      Boolean    @default(true) @map("is_transferable")
+
+  // Location & Project Details
+  location            String?    // Geographic location
+  projectSponsor      String?    @map("project_sponsor") // Underlying project issuer
+
+  // Admin tracking
+  createdById         String?    @map("created_by_id")
+  publishedAt         DateTime?  @map("published_at")
+
+  createdAt           DateTime   @default(now()) @map("created_at")
+  updatedAt           DateTime   @updatedAt @map("updated_at")
 
   // Relations
+  createdBy     AdminUser?     @relation("PoolCreatedBy", fields: [createdById], references: [id])
   investments   Investment[]
   distributions Distribution[]
+  transactions  Transaction[]
+  listings      MarketplaceListing[]
+  watchlist     PoolWatchlist[]
+  reserveOps    ReserveOperation[]
 
+  @@index([status])
+  @@index([sector])
+  @@index([contractTokenId])
   @@map("pools")
 }
 
 enum PoolStatus {
-  DRAFT
-  PENDING_APPROVAL
-  ACTIVE
-  FUNDED
-  CLOSED
-  MATURED
+  DRAFT           // Initial creation, not visible
+  PENDING_REVIEW  // Awaiting admin approval
+  APPROVED        // Approved but not yet live
+  ACTIVE          // Open for investment
+  FUNDED          // Target reached, no more investment
+  CLOSED          // Manually closed
+  MATURED         // Reached maturity date
+  CANCELLED       // Cancelled before funding
 }
 
-// User investments in pools
+enum YieldFrequency {
+  MONTHLY
+  QUARTERLY
+  SEMI_ANNUAL
+  ANNUAL
+  AT_MATURITY
+}
+
+enum RiskRating {
+  LOW
+  MEDIUM
+  HIGH
+  SPECULATIVE
+}
+
+// User investments in pools (aggregated position)
 model Investment {
-  id              String   @id @default(cuid())
-  userId          String   @map("user_id")
-  poolId          String   @map("pool_id")
-  tokenAmount     BigInt   @map("token_amount")
-  purchasePriceUsd Decimal @map("purchase_price_usd") @db.Decimal(18, 2)
-  txHash          String?  @map("tx_hash")
-  purchasedAt     DateTime @default(now()) @map("purchased_at")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  id                String           @id @default(cuid())
+  userId            String           @map("user_id")
+  poolId            String           @map("pool_id")
+  tokenAmount       BigInt           @map("token_amount") // Current token balance
+  totalInvestedUsd  Decimal          @map("total_invested_usd") @db.Decimal(18, 2)
+  averagePriceUsd   Decimal          @map("average_price_usd") @db.Decimal(18, 6)
+  totalClaimedUsd   Decimal          @default(0) @map("total_claimed_usd") @db.Decimal(18, 2)
+  status            InvestmentStatus @default(ACTIVE)
+  firstPurchasedAt  DateTime         @map("first_purchased_at")
+  lastPurchasedAt   DateTime         @map("last_purchased_at")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
 
   // Relations
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  pool   Pool   @relation(fields: [poolId], references: [id], onDelete: Cascade)
-  claims DistributionClaim[]
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pool         Pool                @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  claims       DistributionClaim[]
+  transactions Transaction[]
 
+  @@unique([userId, poolId])
+  @@index([userId])
+  @@index([poolId])
+  @@index([status])
   @@map("investments")
 }
 
-// Dividend/coupon distributions
+enum InvestmentStatus {
+  ACTIVE    // Tokens held
+  REDEEMED  // Fully redeemed at maturity
+  SOLD      // Sold on secondary market
+}
+
+// =============================================================================
+// DISTRIBUTIONS & CLAIMS
+// =============================================================================
+
+// Dividend/coupon distributions created by admin
 model Distribution {
-  id               String             @id @default(cuid())
-  poolId           String             @map("pool_id")
-  amountUsd        Decimal            @map("amount_usd") @db.Decimal(18, 2)
-  distributionDate DateTime           @map("distribution_date")
-  status           DistributionStatus @default(PENDING)
-  txHash           String?            @map("tx_hash")
-  createdAt        DateTime           @default(now()) @map("created_at")
-  updatedAt        DateTime           @updatedAt @map("updated_at")
+  id                    String             @id @default(cuid())
+  poolId                String             @map("pool_id")
+  title                 String             // e.g., "Q4 2024 Dividend"
+  description           String?
+  totalAmountUsd        Decimal            @map("total_amount_usd") @db.Decimal(18, 2)
+  amountPerToken        Decimal            @map("amount_per_token") @db.Decimal(18, 8) // Calculated
+  snapshotTokenSupply   BigInt             @map("snapshot_token_supply") // Total supply at snapshot
+  snapshotDate          DateTime           @map("snapshot_date") // When balances were captured
+  distributionDate      DateTime           @map("distribution_date") // When payments are made
+  expiresAt             DateTime?          @map("expires_at") // Deadline to claim
+  status                DistributionStatus @default(PENDING)
+  contractDistributionId BigInt?           @map("contract_distribution_id") // Reserve contract ID
+  depositTxHash         String?            @map("deposit_tx_hash") // USDC deposit to Reserve
+  createdById           String?            @map("created_by_id")
+  createdAt             DateTime           @default(now()) @map("created_at")
+  updatedAt             DateTime           @updatedAt @map("updated_at")
 
   // Relations
-  pool   Pool                @relation(fields: [poolId], references: [id], onDelete: Cascade)
-  claims DistributionClaim[]
+  pool      Pool                @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  createdBy AdminUser?          @relation("DistributionCreatedBy", fields: [createdById], references: [id])
+  claims    DistributionClaim[]
 
+  @@index([poolId])
+  @@index([status])
+  @@index([distributionDate])
   @@map("distributions")
 }
 
 enum DistributionStatus {
-  PENDING
-  PROCESSING
-  COMPLETED
-  FAILED
+  PENDING      // Created but not funded
+  FUNDED       // USDC deposited to Reserve contract
+  ACTIVE       // Open for claiming
+  COMPLETED    // All claimed or expired
+  CANCELLED    // Cancelled by admin
+  EXPIRED      // Past expiration, unclaimed funds reclaimed
 }
 
 // Individual claim records for distributions
 model DistributionClaim {
-  id             String    @id @default(cuid())
-  distributionId String    @map("distribution_id")
-  investmentId   String    @map("investment_id")
-  amount         Decimal   @db.Decimal(18, 6)
-  claimedAt      DateTime? @map("claimed_at")
-  txHash         String?   @map("tx_hash")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
+  id             String      @id @default(cuid())
+  distributionId String      @map("distribution_id")
+  investmentId   String      @map("investment_id")
+  userId         String      @map("user_id")
+  tokenBalance   BigInt      @map("token_balance") // User's balance at snapshot
+  amountUsd      Decimal     @map("amount_usd") @db.Decimal(18, 6)
+  status         ClaimStatus @default(PENDING)
+  claimedAt      DateTime?   @map("claimed_at")
+  txHash         String?     @map("tx_hash")
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
 
   // Relations
   distribution Distribution @relation(fields: [distributionId], references: [id], onDelete: Cascade)
   investment   Investment   @relation(fields: [investmentId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([distributionId, investmentId])
+  @@index([userId])
+  @@index([status])
   @@map("distribution_claims")
+}
+
+enum ClaimStatus {
+  PENDING   // Eligible but not claimed
+  CLAIMED   // Successfully claimed
+  EXPIRED   // Distribution expired, not claimed
+}
+
+// =============================================================================
+// TRANSACTIONS & BLOCKCHAIN
+// =============================================================================
+
+// All blockchain transactions (purchases, claims, transfers)
+model Transaction {
+  id              String            @id @default(cuid())
+  userId          String            @map("user_id")
+  poolId          String?           @map("pool_id")
+  investmentId    String?           @map("investment_id")
+  type            TransactionType
+  status          TransactionStatus @default(PENDING)
+
+  // Transaction details
+  amountUsd       Decimal?          @map("amount_usd") @db.Decimal(18, 2)
+  tokenAmount     BigInt?           @map("token_amount")
+  pricePerToken   Decimal?          @map("price_per_token") @db.Decimal(18, 6)
+  platformFeeUsd  Decimal?          @map("platform_fee_usd") @db.Decimal(18, 2)
+
+  // Blockchain data
+  txHash          String?           @unique @map("tx_hash")
+  blockNumber     BigInt?           @map("block_number")
+  fromAddress     String?           @map("from_address")
+  toAddress       String?           @map("to_address")
+  gasUsed         BigInt?           @map("gas_used")
+  gasPrice        BigInt?           @map("gas_price")
+
+  // Payment processing (for fiat on-ramp)
+  paymentMethod   String?           @map("payment_method") // "usdc", "wire", "ach"
+  paymentId       String?           @map("payment_id") // External payment processor ID
+  paymentStatus   String?           @map("payment_status")
+
+  // Error handling
+  errorMessage    String?           @map("error_message")
+  retryCount      Int               @default(0) @map("retry_count")
+
+  confirmedAt     DateTime?         @map("confirmed_at")
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+
+  // Relations
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pool       Pool?       @relation(fields: [poolId], references: [id])
+  investment Investment? @relation(fields: [investmentId], references: [id])
+
+  @@index([userId])
+  @@index([poolId])
+  @@index([txHash])
+  @@index([status])
+  @@index([type])
+  @@index([createdAt])
+  @@map("transactions")
+}
+
+enum TransactionType {
+  PURCHASE           // Primary market purchase
+  SALE               // Secondary market sale
+  TRANSFER_IN        // Received tokens
+  TRANSFER_OUT       // Sent tokens
+  CLAIM              // Distribution claim
+  DEPOSIT            // USDC deposit to platform
+  WITHDRAWAL         // USDC withdrawal from platform
+  REFUND             // Refund for failed/cancelled transaction
+}
+
+enum TransactionStatus {
+  PENDING            // Awaiting submission
+  SUBMITTED          // Tx submitted to blockchain
+  CONFIRMING         // Waiting for confirmations
+  CONFIRMED          // Successfully confirmed
+  FAILED             // Transaction failed
+  CANCELLED          // Cancelled by user/admin
+}
+
+// =============================================================================
+// MARKETPLACE (SECONDARY TRADING - FUTURE)
+// =============================================================================
+
+// Marketplace listings for secondary sales
+model MarketplaceListing {
+  id              String                @id @default(cuid())
+  poolId          String                @map("pool_id")
+  sellerId        String                @map("seller_id") // Wallet address
+  tokenAmount     BigInt                @map("token_amount")
+  pricePerToken   Decimal               @map("price_per_token") @db.Decimal(18, 6)
+  totalPrice      Decimal               @map("total_price") @db.Decimal(18, 2)
+  status          MarketplaceListingStatus @default(ACTIVE)
+  expiresAt       DateTime?             @map("expires_at")
+  listingTxHash   String?               @map("listing_tx_hash")
+  cancelTxHash    String?               @map("cancel_tx_hash")
+  createdAt       DateTime              @default(now()) @map("created_at")
+  updatedAt       DateTime              @updatedAt @map("updated_at")
+
+  // Relations
+  pool   Pool                @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  trades MarketplaceTrade[]
+
+  @@index([poolId])
+  @@index([sellerId])
+  @@index([status])
+  @@map("marketplace_listings")
+}
+
+enum MarketplaceListingStatus {
+  ACTIVE
+  PARTIALLY_FILLED
+  FILLED
+  CANCELLED
+  EXPIRED
+}
+
+// Completed trades on marketplace
+model MarketplaceTrade {
+  id            String   @id @default(cuid())
+  listingId     String   @map("listing_id")
+  buyerId       String   @map("buyer_id") // Wallet address
+  tokenAmount   BigInt   @map("token_amount")
+  pricePerToken Decimal  @map("price_per_token") @db.Decimal(18, 6)
+  totalPrice    Decimal  @map("total_price") @db.Decimal(18, 2)
+  platformFee   Decimal  @map("platform_fee") @db.Decimal(18, 2)
+  txHash        String   @unique @map("tx_hash")
+  executedAt    DateTime @map("executed_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  // Relations
+  listing MarketplaceListing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([listingId])
+  @@index([buyerId])
+  @@index([executedAt])
+  @@map("marketplace_trades")
+}
+
+// =============================================================================
+// RESERVE OPERATIONS
+// =============================================================================
+
+// Reserve contract operations (deposits, withdrawals, distributions)
+model ReserveOperation {
+  id                String              @id @default(cuid())
+  poolId            String              @map("pool_id")
+  type              ReserveOperationType
+  amountUsd         Decimal             @map("amount_usd") @db.Decimal(18, 2)
+  status            ReserveOperationStatus @default(PENDING)
+  txHash            String?             @unique @map("tx_hash")
+  contractCallData  Json?               @map("contract_call_data")
+  initiatedBy       String?             @map("initiated_by") // Admin user ID
+  note              String?
+  createdAt         DateTime            @default(now()) @map("created_at")
+  updatedAt         DateTime            @updatedAt @map("updated_at")
+
+  // Relations
+  pool Pool @relation(fields: [poolId], references: [id], onDelete: Cascade)
+
+  @@index([poolId])
+  @@index([type])
+  @@index([status])
+  @@map("reserve_operations")
+}
+
+enum ReserveOperationType {
+  DEPOSIT               // Funds deposited to reserve
+  WITHDRAWAL            // Funds withdrawn from reserve
+  DISTRIBUTION_CREATE   // New distribution created
+  DISTRIBUTION_CANCEL   // Distribution cancelled
+  RECLAIM_EXPIRED       // Unclaimed funds reclaimed
+}
+
+enum ReserveOperationStatus {
+  PENDING
+  SUBMITTED
+  CONFIRMED
+  FAILED
+}
+
+// =============================================================================
+// NOTIFICATIONS & USER ENGAGEMENT
+// =============================================================================
+
+// User notifications
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String           @map("user_id")
+  type      NotificationType
+  title     String
+  message   String
+  data      Json?            // Additional context data
+  isRead    Boolean          @default(false) @map("is_read")
+  readAt    DateTime?        @map("read_at")
+  createdAt DateTime         @default(now()) @map("created_at")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+enum NotificationType {
+  INVESTMENT_CONFIRMED
+  DISTRIBUTION_AVAILABLE
+  CLAIM_SUCCESSFUL
+  KYC_APPROVED
+  KYC_REJECTED
+  POOL_FUNDED
+  POOL_MATURED
+  PRICE_ALERT
+  SYSTEM_ANNOUNCEMENT
+}
+
+// Pool watchlist for users
+model PoolWatchlist {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  poolId    String   @map("pool_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pool Pool @relation(fields: [poolId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, poolId])
+  @@map("pool_watchlist")
+}
+
+// =============================================================================
+// ADMIN & AUDIT
+// =============================================================================
+
+// Audit log for admin actions
+model AuditLog {
+  id          String   @id @default(cuid())
+  adminUserId String   @map("admin_user_id")
+  action      String   // e.g., "pool.create", "user.verify", "distribution.create"
+  entityType  String   @map("entity_type") // e.g., "Pool", "User", "Distribution"
+  entityId    String   @map("entity_id")
+  changes     Json?    // Before/after values
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  // Relations
+  adminUser AdminUser @relation(fields: [adminUserId], references: [id])
+
+  @@index([adminUserId])
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// System configuration (key-value store)
+model SystemConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  updatedBy String?  @map("updated_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("system_config")
+}
+
+// =============================================================================
+// BLOCKCHAIN SYNC
+// =============================================================================
+
+// Track blockchain sync state
+model BlockchainSyncState {
+  id              String   @id @default(cuid())
+  contractAddress String   @unique @map("contract_address")
+  contractName    String   @map("contract_name")
+  lastBlockNumber BigInt   @map("last_block_number")
+  lastBlockHash   String?  @map("last_block_hash")
+  syncedAt        DateTime @map("synced_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("blockchain_sync_state")
+}
+
+// Processed blockchain events (idempotency)
+model ProcessedEvent {
+  id              String   @id @default(cuid())
+  txHash          String   @map("tx_hash")
+  logIndex        Int      @map("log_index")
+  eventName       String   @map("event_name")
+  contractAddress String   @map("contract_address")
+  blockNumber     BigInt   @map("block_number")
+  processedAt     DateTime @default(now()) @map("processed_at")
+
+  @@unique([txHash, logIndex])
+  @@index([contractAddress, blockNumber])
+  @@map("processed_events")
 }
