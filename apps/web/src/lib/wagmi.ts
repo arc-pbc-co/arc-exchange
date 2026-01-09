@@ -8,5 +8,5 @@ export const config = getDefaultConfig({
     polygon,
     ...(process.env.NODE_ENV === 'development' ? [polygonAmoy] : []),
   ],
-  ssr: true,
+  ssr: false,
 });
